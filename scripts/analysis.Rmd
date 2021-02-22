@@ -1,0 +1,380 @@
+---
+title: "Meta-analysis of politeness data"
+author: "Bodo"
+date: "07/02/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+
+Load packages:
+
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(brms)
+```
+
+For reproducibility:
+
+```{r}
+R.Version()
+packageVersion('tidyverse')
+packageVersion('brms')
+```
+
+Load data:
+
+```{r, message = FALSE, warning = FALSE}
+pol <- read_delim('../data/f0measures.txt', delim = '\t')
+```
+
+## Preprocessing and data sanity checks
+
+How many speakers?
+
+```{r}
+unique(pol$speaker)
+```
+
+How many languages?
+
+```{r}
+unique(pol$lang)
+```
+
+How many speakers per language:
+
+```{r}
+spks_count <- pol %>%
+  count(speaker, lang) %>%
+  select(-n) %>% count(lang)
+
+spks_count
+```
+
+Check gender labels.
+
+```{r}
+unique(pol$gend)
+```
+
+Check item identifiers:
+
+```{r}
+unique(pol$item)
+```
+
+Get rid of news and note task:
+
+```{r}
+pol <- filter(pol,
+              !str_detect(item, 'note'))
+```
+
+## Standardize item labels
+
+Fix the items. We need two things:
+
+1) polite and informal pairs of each item need the same identifier
+2) items from different languages need to have different identifiers
+
+Create new item column:
+
+```{r}
+pol$item_fixed <- pol$item
+```
+
+For Austrian and German, we need to get rid of a/b:
+
+```{r}
+ids <- pol$lang == 'Austrian' | pol$lang == 'German'
+pol[ids, ]$item_fixed <- str_replace(pol[ids, ]$item_fixed, 'a|b', '')
+```
+
+For Chinese, the identifiers are "1_8_con_1" and the second element is the item:
+
+```{r}
+ids <- pol$lang == 'Chinese'
+pol[ids, ]$item_fixed <- str_split(pol[ids, ]$item_fixed, '_', simplify = TRUE)[, 2]
+```
+
+For Korean, the structure is "I1_1", "I1_2" and we just need to get the first bit.
+
+```{r}
+ids <- pol$lang == 'Korean'
+pol[ids, ]$item_fixed <- str_split(pol[ids, ]$item_fixed, '_', simplify = TRUE)[, 1]
+```
+
+For Russian the structure is "dct_2_1_pol" and we need to get the second element:
+
+```{r}
+ids <- pol$lang == 'Russian'
+pol[ids, ]$item_fixed <- str_split(pol[ids, ]$item_fixed, '_', simplify = TRUE)[, 2]
+```
+
+Next, merge language with item:
+
+```{r}
+pol <- mutate(pol,
+              unique_item = str_c(lang, '_', item_fixed))
+```
+
+Check item identifiers:
+
+```{r}
+unique(pol$unique_item)
+```
+
+
+
+## Descriptive statistics:
+
+Compute the average mean:
+
+```{r}
+pol %>% group_by(inform) %>% 
+  summarize(M = mean(f0mn, na.rm = TRUE)) %>% 
+  pivot_wider(values_from = M,
+              names_from = inform)
+```
+
+For each language compute mean F0 per politeness category:
+
+```{r}
+lang_avgs <- pol %>% group_by(lang, inform) %>% 
+  summarize(M = mean(f0mn, na.rm = TRUE)) %>% 
+  pivot_wider(values_from = M,
+              names_from = inform) %>% 
+  mutate(diff = pol - inform)
+
+# Show table:
+
+lang_avgs
+```
+
+Check how many speakers lower their F0 in the polite condition:
+
+```{r}
+spk_avgs <- pol %>%
+  group_by(lang, speaker, inform) %>% 
+  summarize(M = mean(f0mn, na.rm = TRUE)) %>% 
+  pivot_wider(values_from = M,
+              names_from = inform) %>% 
+  mutate(diff = pol - inform)
+```
+
+How many lowered per language?
+
+```{r}
+spk_lowered <- spk_avgs %>%
+  mutate(direction = ifelse(diff < 0, 1, 0)) %>% # 1 = lower
+  group_by(lang) %>% 
+  summarize(N_lowered = sum(direction))
+
+spk_lowered <- left_join(spk_lowered, spks_count)
+
+spk_lowered <- mutate(spk_lowered,
+                      prop_lowered = N_lowered / n,
+                      prop_lowered = round(prop_lowered, 2))
+
+# Show table:
+
+spk_lowered
+
+# Write table:
+
+write_csv(spk_lowered, file = '../tables/proportion_lowered.csv')
+```
+
+Overall number of speakers that lowered:
+
+```{r}
+spk_avgs %>% ungroup() %>% 
+  mutate(direction = ifelse(diff < 0, 1, 0)) %>%
+  summarize(N_lowered = sum(direction))
+```
+
+Compare this to total number of speakers:
+
+```{r}
+nrow(spk_avgs)
+```
+
+
+
+## Inferential stats:
+
+For parallel processing:
+
+```{r}
+options(mc.cores=parallel::detectCores())
+```
+
+Set MCMC controls for convergence:
+
+```{r}
+mcmc_controls <- list(adapt_delta = 0.99,
+                      max_treedepth = 14)
+```
+
+Set weakly informative priors on beta coefficients. We know from 
+
+```{r}
+priors <- c(prior(normal(0, 10), class = b))
+```
+
+Bayesian model:
+
+```{r, message = FALSE, warning = FALSE}
+pol_mdl <- brm(f0mn ~ inform + gend +
+                 (1 + inform|speaker) + (1 + inform|lang) + (1|unique_item),
+               data = pol,
+               
+               # Priors:
+               prior = priors,
+                
+               # MCMC settings:
+               init = 0, seed = 666,
+               cores = 4, chains = 4,
+               warmup = 4000, iter = 6000,
+               control = mcmc_controls)
+```
+
+Summarize:
+
+```{r}
+summary(pol_mdl)
+```
+
+Extract posterior samples:
+
+```{r}
+pol_posts <- posterior_samples(pol_mdl)
+```
+
+Check the posterior probability of the effect being below zero:
+
+```{r}
+1 - (sum(pol_posts$b_informpol < 0) / nrow(pol_posts))
+```
+
+The model above has a striking feature, which is that the random slope variation is larger for speakers than it is for languages! This is a nice way of looking at cross-linguistic consistency. Let's check the posterior probability of the random slope variation for speakers being larger than those of languages:
+
+```{r}
+sum(pol_posts$sd_lang__informpol > pol_posts$sd_speaker__informpol) /
+  nrow(pol_posts)
+```
+
+Interesting. About 90% credibility that speakers vary more from each other with respect to politeness than languages do!
+
+Posterior predictive checks:
+
+```{r, fig.width = 8, fig.height = 6}
+pp_check_plot <- pp_check(pol_mdl, nsamples = 1000)
+
+# Show in markdown:
+
+pp_check_plot
+ggsave(plot = pp_check_plot, filename = '../figures/posterior_predictive_checks.png',
+       width = 8, height = 6)
+```
+
+## Visualization
+
+Compute the estimates per language:
+
+```{r}
+catalan <- pol_posts$b_informpol + pol_posts$`r_lang[Catalan,informpol]`
+korean <- pol_posts$b_informpol + pol_posts$`r_lang[Korean,informpol]`
+japanese <- pol_posts$b_informpol + pol_posts$`r_lang[Japanese,informpol]`
+chinese <- pol_posts$b_informpol + pol_posts$`r_lang[Chinese,informpol]`
+austrian <- pol_posts$b_informpol + pol_posts$`r_lang[Austrian,informpol]`
+german <- pol_posts$b_informpol + pol_posts$`r_lang[German,informpol]`
+russian <- pol_posts$b_informpol + pol_posts$`r_lang[Russian,informpol]`
+
+# Put all into tibble:
+
+langs <- tibble(catalan, korean, japanese, chinese, austrian, german)
+```
+
+Put the posterior means and 95% credible intervals into a tibble:
+
+```{r}
+M <- summarize_all(langs, mean) %>% unlist() %>% as.vector()
+CI_lower <- summarize_all(langs, function(x) quantile(x, 0.025)) %>% 
+  unlist() %>% as.vector()
+CI_upper <- summarize_all(langs, function(x) quantile(x, 0.975)) %>% 
+  unlist() %>% as.vector()
+
+langs <- tibble(language = colnames(langs),
+                M, CI_lower, CI_upper) %>% 
+  mutate(language = str_to_title(language))
+
+# Check:
+
+langs
+```
+
+Get the actual means per language into there:
+
+```{r}
+langs <- left_join(langs, lang_avgs, by = c('language' = 'lang'))
+```
+
+Make a plot of this:
+
+```{r, fig.width = 10, fig.height = 6}
+# Setup astethics:
+
+p <- langs %>% ggplot(aes(x = reorder(language, M), y = M,
+                          ymin = CI_lower, ymax = CI_upper))
+
+# Add geoms:
+
+p <- p +
+  geom_errorbar(width = 0.25, size = 0.75) +
+  geom_point(shape = 15, size = 4) +
+  geom_hline(mapping = aes(yintercept = 0),
+             linetype = 2)
+
+# Add descriptive averages on top of that diamond shaped:
+
+p <- p +
+  geom_point(mapping = aes(y = diff),
+             shape = 23, fill = 'grey', col = 'black',
+             size = 4)
+
+# Cosmetic tweaks:
+
+p <- p +
+  ylab('F0 difference\n(polite - informal)') + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1,
+                                   face = 'bold', size = 14),
+        axis.title.y = element_text(size = 16, face = 'bold'),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        plot.background = element_rect(fill = 'transparent', colour = NA))
+
+# Plot:
+
+p
+
+# Save plot:
+
+ggsave(plot = p, filename = '../figures/language_posteriors.pdf',
+       width = 8, height = 5)
+```
+
+
+
+This completes this analysis.
+
+
+
