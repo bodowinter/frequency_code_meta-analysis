@@ -30,7 +30,7 @@ packageVersion('brms')
 Load data:
 
 ```{r, message = FALSE, warning = FALSE}
-pol <- read_delim('../data/f0measures.txt', delim = '\t')
+pol <- read_delim('../data/f0measures_2021-Mar-04.txt', delim = '\t')
 ```
 
 ## Preprocessing and data sanity checks
@@ -61,6 +61,12 @@ Check gender labels.
 
 ```{r}
 unique(pol$gend)
+```
+
+How many gender per language?
+
+```{r}
+pol %>% count(lang, speaker, gend) %>% count(lang, gend)
 ```
 
 Check item identifiers:
@@ -130,7 +136,11 @@ Check item identifiers:
 unique(pol$unique_item)
 ```
 
+How many items per language?
 
+```{r}
+pol %>% count(lang, unique_item) %>% count(lang)
+```
 
 ## Descriptive statistics:
 
@@ -138,7 +148,7 @@ Compute the average mean:
 
 ```{r}
 pol %>% group_by(inform) %>% 
-  summarize(M = mean(f0mn, na.rm = TRUE)) %>% 
+  summarize(M = mean(f0md, na.rm = TRUE)) %>% 
   pivot_wider(values_from = M,
               names_from = inform)
 ```
@@ -147,7 +157,7 @@ For each language compute mean F0 per politeness category:
 
 ```{r}
 lang_avgs <- pol %>% group_by(lang, inform) %>% 
-  summarize(M = mean(f0mn, na.rm = TRUE)) %>% 
+  summarize(M = mean(f0md, na.rm = TRUE)) %>% 
   pivot_wider(values_from = M,
               names_from = inform) %>% 
   mutate(diff = pol - inform)
@@ -162,7 +172,7 @@ Check how many speakers lower their F0 in the polite condition:
 ```{r}
 spk_avgs <- pol %>%
   group_by(lang, speaker, inform) %>% 
-  summarize(M = mean(f0mn, na.rm = TRUE)) %>% 
+  summarize(M = mean(f0md, na.rm = TRUE)) %>% 
   pivot_wider(values_from = M,
               names_from = inform) %>% 
   mutate(diff = pol - inform)
@@ -231,8 +241,10 @@ priors <- c(prior(normal(0, 10), class = b))
 Bayesian model:
 
 ```{r, message = FALSE, warning = FALSE}
-pol_mdl <- brm(f0mn ~ inform + gend +
-                 (1 + inform|speaker) + (1 + inform|lang) + (1|unique_item),
+pol_mdl <- brm(f0md ~ inform + gend +
+                 (1 + inform|speaker) +
+                 (1 + inform|lang) +
+                 (1|unique_item),
                data = pol,
                
                # Priors:
@@ -282,6 +294,8 @@ pp_check_plot <- pp_check(pol_mdl, nsamples = 1000)
 pp_check_plot
 ggsave(plot = pp_check_plot, filename = '../figures/posterior_predictive_checks.png',
        width = 8, height = 6)
+ggsave(plot = pp_check_plot, filename = '../figures/posterior_predictive_checks.pdf',
+       width = 8, height = 6)
 ```
 
 ## Visualization
@@ -299,7 +313,7 @@ russian <- pol_posts$b_informpol + pol_posts$`r_lang[Russian,informpol]`
 
 # Put all into tibble:
 
-langs <- tibble(catalan, korean, japanese, chinese, austrian, german)
+langs <- tibble(catalan, korean, japanese, chinese, austrian, german, russian)
 ```
 
 Put the posterior means and 95% credible intervals into a tibble:
@@ -352,7 +366,7 @@ p <- p +
 # Cosmetic tweaks:
 
 p <- p +
-  ylab('F0 difference\n(polite - informal)') + 
+  ylab('F0 difference\n(polite minus non-polite)') + 
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1,
                                    face = 'bold', size = 14),
@@ -371,8 +385,6 @@ p
 ggsave(plot = p, filename = '../figures/language_posteriors.pdf',
        width = 8, height = 5)
 ```
-
-
 
 This completes this analysis.
 
